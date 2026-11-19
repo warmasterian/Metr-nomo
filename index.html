@@ -1,0 +1,489 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="application-name" content="Metrónomo HUD">
+<meta name="description" content="Metrónomo transparente con pulso visual y sonido para Meta Ray-Ban Display.">
+<title>Metrónomo HUD</title>
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<style>
+  /* Pantalla aditiva: el negro puro NO emite luz, así que se ve a través de él.
+     Todo el lienzo es #000 y solo se "enciende" lo que se dibuja. */
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { inline-size: 100%; block-size: 100%; }
+  body {
+    margin: 0; background: #000; color: #fff; overflow: hidden;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  :root { --k: .30; --c: #5ee1ff; }
+
+  .app-shell {
+    display: grid; grid-template-rows: minmax(0, 1fr) auto;
+    inline-size: 100%; block-size: 100%; padding: 4vmin; gap: 2vmin;
+  }
+
+  /* ---------- Escenario (el "HUD" transparente) ---------- */
+  #area { display: grid; min-block-size: 0; min-inline-size: 0; place-items: center; }
+  #area[data-pos="top"]    { place-items: start center; }
+  #area[data-pos="bottom"] { place-items: end center; }
+  #area[data-pos="left"]   { place-items: center start; }
+  #area[data-pos="right"]  { place-items: center end; }
+
+  #stage { position: relative; inline-size: calc(100vmin * var(--k)); block-size: calc(100vmin * var(--k)); pointer-events: none; }
+  #cv { position: absolute; inset: 0; inline-size: 100%; block-size: 100%; }
+
+  #readout { position: absolute; display: flex; flex-direction: column; align-items: center; line-height: 1; color: var(--c); }
+  #bpmNum { font-weight: 700; font-size: calc(100vmin * var(--k) * .22); letter-spacing: -.02em; }
+  #tempoName { font-size: calc(100vmin * var(--k) * .075); margin-block-start: .25em; opacity: .85; }
+  #stage[data-mode="ring"] #readout, #stage[data-mode="frame"] #readout { inset-inline: 0; inset-block-start: 50%; transform: translateY(-50%); }
+  #stage[data-mode="dots"] #readout { inset-inline: 0; inset-block-start: 14%; }
+  #stage[data-mode="pend"] #readout, #stage[data-mode="ball"] #readout, #stage[data-mode="sweep"] #readout { inset-inline-start: 0; inset-block-start: 0; align-items: flex-start; }
+  #stage[data-mode="sweep"] #readout { inset-block-start: 8%; }
+
+  /* ---------- Barra de controles ---------- */
+  #bar { display: flex; gap: 2.4vmin; transition: opacity .35s; }
+  #bar.dim { opacity: 0; }
+  #bar button { flex: 1 1 0; }
+  #bar #playBtn { flex: 1.5 1 0; }
+
+  button {
+    font: inherit; font-weight: 600; font-size: 22px; color: #fff; cursor: pointer;
+    min-block-size: 58px; padding: 6px 14px; border-radius: 20px;
+    background: #1b1d23; border: 2px solid #5b5f6b;
+  }
+  button:active { background: #2e3140; }
+  button:focus-visible { outline: 4px solid #fff; outline-offset: 3px; background: #2a2d37; }
+  button[aria-pressed="true"] { background: #2a4a57; border-color: var(--c); }
+
+  /* ---------- Ajustes ---------- */
+  #settings { position: fixed; inset: 0; background: #000; overflow-y: auto; padding: 4vmin; scroll-padding-block: 20vmin; }
+  #settings header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-block-end: 10px; }
+  #settings h1 { margin: 0; font-size: 28px; }
+  #list { display: grid; gap: 10px; padding-block-end: 28px; }
+  #list h2 { margin: 14px 4px 0; font-size: 18px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: #9aa0ad; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 8px 8px 16px; border-radius: 22px; background: #15161a; border: 1px solid #343741; }
+  .lbl { font-size: 21px; color: #e6e8ee; }
+  .ctl { display: flex; align-items: center; gap: 8px; }
+  .val { min-inline-size: 118px; text-align: center; font-size: 22px; font-weight: 700; color: var(--c); }
+  .sq { min-inline-size: 58px; padding-inline: 0; font-size: 26px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chips button { flex: 1 1 28%; font-size: 19px; }
+  .stack { display: grid; gap: 8px; padding: 10px; border-radius: 22px; background: #15161a; border: 1px solid #343741; }
+  .bpmline { display: flex; align-items: center; justify-content: center; gap: 8px; }
+  .bpmline .val { font-size: 34px; min-inline-size: 110px; }
+  .note { margin: 6px 6px 0; font-size: 17px; color: #8a8f9c; }
+</style>
+</head>
+<body>
+<div class="app-shell" id="app">
+  <main id="area" data-pos="top">
+    <div id="stage" data-mode="ring" aria-hidden="true">
+      <canvas id="cv"></canvas>
+      <div id="readout"><span id="bpmNum">100</span><span id="tempoName"></span></div>
+    </div>
+  </main>
+
+  <nav id="bar" aria-label="Controles del metrónomo">
+    <button type="button" id="setBtn">Ajustes</button>
+    <button type="button" id="minusBtn" aria-label="Bajar 5 BPM">−5</button>
+    <button type="button" id="playBtn" autofocus>Iniciar</button>
+    <button type="button" id="plusBtn" aria-label="Subir 5 BPM">+5</button>
+  </nav>
+
+  <section id="settings" hidden aria-label="Ajustes">
+    <header>
+      <h1>Ajustes</h1>
+      <button type="button" id="doneBtn">Listo</button>
+    </header>
+    <div id="list"></div>
+  </section>
+</div>
+
+<script>
+(() => {
+'use strict';
+
+/* ================= Estado y persistencia ================= */
+const KEY = 'mrbd-metronomo-v1';
+const DEF = { bpm: 100, beats: 4, sub: 1, accent: true, style: 0, color: 0, size: 0, pos: 0,
+              opacity: 80, showBpm: true, sound: 0, vol: 70, sync: 0, autoHide: true };
+const STYLES = [['ring','Anillo'],['pend','Péndulo'],['dots','Puntos'],['ball','Pelota'],['sweep','Barrido'],['frame','Marco']];
+const POS    = [['top','Arriba'],['center','Centro'],['bottom','Abajo'],['left','Izquierda'],['right','Derecha']];
+const SIZES  = [['Pequeño',.30],['Medio',.46],['Grande',.66]];
+const SOUNDS = ['Click','Madera','Pitido','Hi-hat','Silencio'];
+const SUBS   = ['Negras','Corcheas','Tresillos','Semicorcheas'];
+const PAL = [
+  { n: 'Cian',   a: '#5ee1ff', b: '#ffc84a' },
+  { n: 'Verde',  a: '#6dff9a', b: '#ffffff' },
+  { n: 'Ámbar',  a: '#ffc84a', b: '#ffffff' },
+  { n: 'Rosa',   a: '#ff7ab8', b: '#ffffff' },
+  { n: 'Blanco', a: '#ffffff', b: '#ffc84a' },
+];
+const PRESETS = [['Largo',50],['Adagio',70],['Andante',90],['Moderato',110],['Allegro',130],['Presto',180]];
+
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const mod = (v, n) => ((v % n) + n) % n;
+
+let S = { ...DEF };
+try { const raw = localStorage.getItem(KEY); if (raw) S = { ...DEF, ...JSON.parse(raw) }; } catch (e) {}
+function sanitize() {
+  S.bpm = clamp(Math.round(+S.bpm) || DEF.bpm, 20, 300);
+  S.beats = clamp(Math.round(+S.beats) || DEF.beats, 1, 12);
+  S.sub = clamp(Math.round(+S.sub) || 1, 1, 4);
+  S.style = mod(+S.style || 0, STYLES.length);
+  S.color = mod(+S.color || 0, PAL.length);
+  S.size = mod(+S.size || 0, SIZES.length);
+  S.pos = mod(+S.pos || 0, POS.length);
+  S.sound = mod(+S.sound || 0, SOUNDS.length);
+  S.opacity = clamp(Math.round(+S.opacity) || DEF.opacity, 20, 100);
+  S.vol = clamp(Math.round(+S.vol) || 0, 0, 100);
+  S.sync = clamp(Math.round(+S.sync) || 0, -300, 300);
+  S.accent = !!S.accent; S.showBpm = !!S.showBpm; S.autoHide = !!S.autoHide;
+}
+sanitize();
+const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) {} };
+
+/* ================= Audio (WebAudio con scheduler de anticipación) ================= */
+let ac = null, master = null, noiseBuf = null;
+function ensureAudio() {
+  if (ac) return;
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    ac = new AC({ latencyHint: 'interactive' });
+    master = ac.createGain(); master.gain.value = S.vol / 100; master.connect(ac.destination);
+    noiseBuf = ac.createBuffer(1, Math.floor(ac.sampleRate * 0.2), ac.sampleRate);
+    const d = noiseBuf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  } catch (e) { ac = null; }
+}
+const clockNow = () => ac ? ac.currentTime : performance.now() / 1000;
+
+function tick(time, accent, level) {
+  if (!ac || S.sound === 4) return;
+  const g = ac.createGain(); g.connect(master);
+  const peak = (accent ? 1 : 0.72) * level;
+  const env = (dur) => {
+    g.gain.setValueAtTime(0.0001, time);
+    g.gain.linearRampToValueAtTime(peak, time + 0.002);
+    g.gain.exponentialRampToValueAtTime(0.0001, time + dur);
+  };
+  if (S.sound === 3) {                       // Hi-hat: ruido filtrado
+    const src = ac.createBufferSource(); src.buffer = noiseBuf;
+    const hp = ac.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 7000;
+    src.connect(hp); hp.connect(g);
+    const dur = accent ? 0.09 : 0.05; env(dur);
+    src.start(time); src.stop(time + dur + 0.02);
+    return;
+  }
+  const o = ac.createOscillator(); o.connect(g);
+  let dur;
+  if (S.sound === 0) { o.type = 'square'; o.frequency.value = accent ? 2200 : 1500; dur = 0.035; }
+  else if (S.sound === 1) {                  // Madera: triángulo con caída de tono
+    o.type = 'triangle'; const f = accent ? 1300 : 900;
+    o.frequency.setValueAtTime(f, time); o.frequency.exponentialRampToValueAtTime(f * 0.6, time + 0.05); dur = 0.07;
+  } else { o.type = 'sine'; o.frequency.value = accent ? 1320 : 880; dur = 0.09; }
+  env(dur); o.start(time); o.stop(time + dur + 0.02);
+}
+
+/* Scheduler: programa notas ~120 ms por adelantado con el reloj de audio */
+let playing = false, timer = null, nextTime = 0, beatIdx = 0, subIdx = 0, beatCount = 0;
+const events = [];
+const spb = () => 60 / S.bpm;
+function schedule() {
+  const horizon = clockNow() + 0.12;
+  while (nextTime < horizon) {
+    const main = subIdx === 0;
+    const accent = main && beatIdx === 0 && S.accent;
+    if (main) events.push({ time: nextTime, beat: beatIdx, n: beatCount++, spb: spb() });
+    tick(nextTime, accent, main ? 1 : 0.4);
+    nextTime += spb() / S.sub;
+    if (++subIdx >= S.sub) { subIdx = 0; beatIdx = (beatIdx + 1) % S.beats; }
+  }
+  while (events.length > 40) events.shift();
+}
+
+let wl = null;
+async function lockScreen() { try { if (navigator.wakeLock) wl = await navigator.wakeLock.request('screen'); } catch (e) {} }
+function unlockScreen() { try { if (wl) wl.release(); } catch (e) {} wl = null; }
+
+function start() {
+  ensureAudio();
+  if (ac && ac.state !== 'running') ac.resume().catch(() => {});
+  beatIdx = 0; subIdx = 0; beatCount = 0; events.length = 0;
+  nextTime = clockNow() + 0.1;
+  playing = true;
+  timer = setInterval(schedule, 25); schedule();
+  lockScreen(); refresh(); armHide();
+}
+function stop() {
+  playing = false; clearInterval(timer); timer = null; events.length = 0;
+  unlockScreen(); wake(); refresh();
+}
+const toggle = () => (playing ? stop() : start());
+
+/* ================= Dibujo (canvas) ================= */
+const $ = (s) => document.querySelector(s);
+const cv = $('#cv'), g2 = cv.getContext('2d'), stage = $('#stage');
+let cw = 0, dpr = 1;
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  cw = stage.clientWidth;
+  cv.width = Math.round(cw * dpr); cv.height = Math.round(cw * dpr);
+}
+new ResizeObserver(resize).observe(stage);
+
+function pips(o, y, scale = 1) {
+  const N = S.beats, step = Math.min(o.W * 0.085, (o.W * 0.9) / N) * scale, r = step * 0.24;
+  const x0 = o.W / 2 - ((N - 1) * step) / 2;
+  for (let i = 0; i < N; i++) {
+    const active = o.on && i === o.beat;
+    g2.fillStyle = (i === 0 && S.accent) ? o.pal.b : o.pal.a;
+    g2.globalAlpha = active ? 1 : 0.3;
+    g2.beginPath(); g2.arc(x0 + i * step, y, r * (active ? 1.35 : 1), 0, 7); g2.fill();
+  }
+  g2.globalAlpha = 1;
+}
+
+const DRAW = {
+  ring(o) {
+    const { W, decay, beat, frac } = o, c = W / 2, r = W * 0.36, N = S.beats;
+    const seg = (Math.PI * 2) / N, gap = N === 1 ? 0 : Math.min(0.14, seg * 0.25);
+    g2.lineCap = 'round';
+    for (let i = 0; i < N; i++) {
+      const active = o.on && i === beat;
+      g2.strokeStyle = (i === 0 && S.accent) ? o.pal.b : o.pal.a;
+      g2.globalAlpha = active ? 0.6 + 0.4 * decay : 0.28;
+      g2.lineWidth = W * (active ? 0.045 + 0.03 * decay : 0.03);
+      g2.beginPath();
+      g2.arc(c, c, r + (active ? W * 0.02 * decay : 0), -Math.PI / 2 + i * seg + gap / 2, -Math.PI / 2 + (i + 1) * seg - gap / 2);
+      g2.stroke();
+    }
+    if (o.on) {                               // halo que se expande en cada pulso
+      g2.strokeStyle = o.col; g2.globalAlpha = (1 - frac) * 0.55; g2.lineWidth = W * 0.012;
+      g2.beginPath(); g2.arc(c, c, r + W * 0.02 + W * 0.12 * frac, 0, 7); g2.stroke();
+    }
+    g2.globalAlpha = 1;
+  },
+  pend(o) {
+    const { W, frac, decay } = o, px = W / 2, py = W * 0.1, L = W * 0.74, A = 0.62;
+    const dir = o.n % 2 === 0 ? 1 : -1;
+    const ang = dir * A * Math.cos(Math.PI * frac);
+    const wx = px + Math.sin(ang) * L, wy = py + Math.cos(ang) * L;
+    g2.lineCap = 'round';
+    g2.strokeStyle = o.pal.a; g2.globalAlpha = 0.22; g2.lineWidth = W * 0.01;
+    g2.beginPath(); g2.arc(px, py, L, Math.PI / 2 - A, Math.PI / 2 + A); g2.stroke();
+    g2.globalAlpha = 0.85; g2.strokeStyle = o.col; g2.lineWidth = W * 0.014;
+    g2.beginPath(); g2.moveTo(px, py); g2.lineTo(wx, wy); g2.stroke();
+    g2.globalAlpha = 1; g2.fillStyle = o.col;
+    g2.beginPath(); g2.arc(px, py, W * 0.025, 0, 7); g2.fill();
+    g2.beginPath(); g2.arc(wx, wy, W * 0.06 * (1 + 0.28 * decay), 0, 7); g2.fill();
+    pips(o, W * 0.95);
+  },
+  dots(o) {
+    const { W, decay } = o, N = S.beats, step = Math.min(W / N, W * 0.2), r = step * 0.32;
+    const x0 = W / 2 - ((N - 1) * step) / 2, y = W * 0.68;
+    for (let i = 0; i < N; i++) {
+      const active = o.on && i === o.beat;
+      const c = (i === 0 && S.accent) ? o.pal.b : o.pal.a;
+      g2.strokeStyle = c; g2.fillStyle = c;
+      g2.lineWidth = W * 0.014; g2.globalAlpha = active ? 1 : 0.4;
+      g2.beginPath(); g2.arc(x0 + i * step, y, r * (active ? 1 + 0.35 * decay : 1), 0, 7);
+      if (active) g2.fill(); else g2.stroke();
+    }
+    g2.globalAlpha = 1;
+  },
+  ball(o) {
+    const { W, frac, decay } = o, c = W / 2, floor = W * 0.8, rad = W * 0.07;
+    const hh = o.on ? 4 * frac * (1 - frac) * W * 0.55 : 0;
+    const sq = o.on ? Math.max(Math.exp(-frac * 16), Math.exp(-(1 - frac) * 16)) : 0;
+    const sx = 1 + 0.35 * sq, sy = 1 - 0.35 * sq;
+    g2.lineCap = 'round'; g2.strokeStyle = o.pal.a; g2.globalAlpha = 0.45; g2.lineWidth = W * 0.012;
+    g2.beginPath(); g2.moveTo(W * 0.2, floor); g2.lineTo(W * 0.8, floor); g2.stroke();
+    g2.globalAlpha = 1; g2.fillStyle = o.col;
+    g2.beginPath(); g2.ellipse(c, floor - rad * sy - hh, rad * sx, rad * sy, 0, 0, 7); g2.fill();
+    pips(o, W * 0.94);
+  },
+  sweep(o) {
+    const { W, frac, decay } = o, c = W / 2, half = W * 0.42, y = W * 0.5, dir = o.n % 2 === 0 ? 1 : -1;
+    const x = c + dir * half * Math.cos(Math.PI * frac);
+    g2.lineCap = 'round'; g2.strokeStyle = o.pal.a; g2.lineWidth = W * 0.012;
+    g2.globalAlpha = 0.4;
+    g2.beginPath(); g2.moveTo(c - half, y); g2.lineTo(c + half, y); g2.stroke();
+    g2.lineWidth = W * 0.02; g2.globalAlpha = 0.7;
+    for (const s of [-1, 1]) { g2.beginPath(); g2.moveTo(c + s * half, y - W * 0.07); g2.lineTo(c + s * half, y + W * 0.07); g2.stroke(); }
+    g2.globalAlpha = 1; g2.fillStyle = o.col;
+    g2.beginPath(); g2.arc(x, y, W * 0.045 * (1 + 0.4 * decay), 0, 7); g2.fill();
+    pips(o, W * 0.72);
+  },
+  frame(o) {
+    const { W, decay } = o, i = W * 0.04, lw = W * 0.012 + (o.on ? W * 0.05 * decay : 0);
+    g2.strokeStyle = o.col; g2.lineWidth = lw; g2.globalAlpha = o.on ? 0.25 + 0.75 * decay : 0.25;
+    if (o.on) { g2.shadowColor = o.col; g2.shadowBlur = W * 0.1 * decay; }
+    g2.beginPath();
+    if (g2.roundRect) g2.roundRect(i, i, W - 2 * i, W - 2 * i, W * 0.12); else g2.rect(i, i, W - 2 * i, W - 2 * i);
+    g2.stroke();
+    g2.shadowBlur = 0; g2.globalAlpha = 1;
+    pips(o, W * 0.72);
+  },
+};
+
+function frame() {
+  requestAnimationFrame(frame);
+  if (!cw) return;
+  const lat = ac ? (ac.outputLatency || ac.baseLatency || 0) : 0;   // compensa la latencia de salida
+  const t = clockNow() - lat - S.sync / 1000;
+  let ev = null;
+  if (playing) for (let i = events.length - 1; i >= 0; i--) if (events[i].time <= t) { ev = events[i]; break; }
+  const o = { W: cw, on: !!ev, frac: 0, decay: 0, beat: 0, n: 0, pal: PAL[S.color] };
+  if (ev) { o.frac = clamp((t - ev.time) / ev.spb, 0, 1); o.decay = Math.exp(-o.frac * 4.5); o.beat = ev.beat; o.n = ev.n; }
+  o.col = (ev && ev.beat === 0 && S.accent) ? o.pal.b : o.pal.a;
+  g2.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g2.clearRect(0, 0, cw, cw);
+  DRAW[STYLES[S.style][0]](o);
+}
+
+/* ================= Interfaz ================= */
+const bar = $('#bar'), playBtn = $('#playBtn'), settings = $('#settings'), list = $('#list'), area = $('#area');
+const updaters = [];
+
+function tempoName(b) {
+  return b < 60 ? 'Largo' : b < 76 ? 'Adagio' : b < 108 ? 'Andante' : b < 120 ? 'Moderato' : b < 156 ? 'Allegro' : b < 176 ? 'Vivace' : 'Presto';
+}
+function refresh() {
+  sanitize();
+  if (S.beats <= beatIdx) beatIdx = 0;
+  if (subIdx >= S.sub) subIdx = 0;
+  stage.dataset.mode = STYLES[S.style][0];
+  area.dataset.pos = POS[S.pos][0];
+  document.documentElement.style.setProperty('--k', SIZES[S.size][1]);
+  document.documentElement.style.setProperty('--c', PAL[S.color].a);
+  stage.style.opacity = S.opacity / 100;
+  $('#readout').hidden = !S.showBpm;
+  $('#bpmNum').textContent = S.bpm;
+  $('#tempoName').textContent = tempoName(S.bpm);
+  playBtn.textContent = playing ? 'Pausar' : 'Iniciar';
+  if (master) master.gain.value = S.vol / 100;
+  updaters.forEach((u) => u());
+  save();
+}
+
+function h(tag, props = {}, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (k === 'class') el.className = v;
+    else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else el.setAttribute(k, v);
+  }
+  kids.flat().forEach((c) => el.append(c));
+  return el;
+}
+const btn = (text, fn, cls = '', label) => h('button', { type: 'button', class: cls, onclick: fn, ...(label ? { 'aria-label': label } : {}) }, text);
+const section = (t) => list.append(h('h2', {}, t));
+function stepRow(label, text, dec, inc) {
+  const out = h('output', { class: 'val' });
+  list.append(h('div', { class: 'row' }, h('span', { class: 'lbl' }, label),
+    h('div', { class: 'ctl' }, btn('‹', dec, 'sq', label + ' anterior'), out, btn('›', inc, 'sq', label + ' siguiente'))));
+  updaters.push(() => { out.textContent = text(); });
+}
+function toggleRow(label, get, flip) {
+  const b = h('button', { type: 'button', class: 'sq', style: 'min-inline-size:118px', onclick: flip });
+  list.append(h('div', { class: 'row' }, h('span', { class: 'lbl' }, label), h('div', { class: 'ctl' }, b)));
+  updaters.push(() => { b.textContent = get() ? 'Sí' : 'No'; b.setAttribute('aria-pressed', String(!!get())); });
+}
+const cycle = (key, n, d) => () => { S[key] = mod(S[key] + d, n); refresh(); };
+const setBpm = (v) => { S.bpm = clamp(Math.round(v), 20, 300); refresh(); };
+
+/* --- Construcción de la pantalla de ajustes --- */
+section('Tempo');
+{
+  const num = h('output', { class: 'val' });
+  list.append(h('div', { class: 'stack' },
+    h('div', { class: 'bpmline' },
+      btn('−10', () => setBpm(S.bpm - 10), 'sq', 'Bajar 10'), btn('−1', () => setBpm(S.bpm - 1), 'sq', 'Bajar 1'),
+      num,
+      btn('+1', () => setBpm(S.bpm + 1), 'sq', 'Subir 1'), btn('+10', () => setBpm(S.bpm + 10), 'sq', 'Subir 10')),
+    h('div', { class: 'chips' }, PRESETS.map(([n, v]) => {
+      const b = btn(`${n} ${v}`, () => setBpm(v)); b.dataset.bpm = v; return b;
+    })),
+    btn('Tap tempo (tocá al ritmo)', tapTempo)));
+  updaters.push(() => {
+    num.textContent = S.bpm;
+    list.querySelectorAll('.chips button').forEach((b) => b.setAttribute('aria-pressed', String(+b.dataset.bpm === S.bpm)));
+  });
+}
+const taps = [];
+function tapTempo() {
+  const t = performance.now();
+  if (taps.length && t - taps[taps.length - 1] > 2000) taps.length = 0;
+  taps.push(t); if (taps.length > 5) taps.shift();
+  if (taps.length >= 2) setBpm(60000 / ((taps[taps.length - 1] - taps[0]) / (taps.length - 1)));
+}
+
+section('Compás');
+stepRow('Golpes', () => S.beats, () => { S.beats--; refresh(); }, () => { S.beats++; refresh(); });
+stepRow('Subdivisión', () => SUBS[S.sub - 1], () => { S.sub = mod(S.sub - 2, 4) + 1; refresh(); }, () => { S.sub = mod(S.sub, 4) + 1; refresh(); });
+toggleRow('Acento en el 1', () => S.accent, () => { S.accent = !S.accent; refresh(); });
+
+section('Imagen');
+stepRow('Estilo', () => STYLES[S.style][1], cycle('style', STYLES.length, -1), cycle('style', STYLES.length, 1));
+stepRow('Color', () => PAL[S.color].n, cycle('color', PAL.length, -1), cycle('color', PAL.length, 1));
+stepRow('Tamaño', () => SIZES[S.size][0], cycle('size', SIZES.length, -1), cycle('size', SIZES.length, 1));
+stepRow('Posición', () => POS[S.pos][1], cycle('pos', POS.length, -1), cycle('pos', POS.length, 1));
+stepRow('Opacidad', () => S.opacity + '%', () => { S.opacity -= 10; refresh(); }, () => { S.opacity += 10; refresh(); });
+toggleRow('Mostrar BPM', () => S.showBpm, () => { S.showBpm = !S.showBpm; refresh(); });
+
+section('Sonido');
+stepRow('Sonido', () => SOUNDS[S.sound], cycle('sound', SOUNDS.length, -1), cycle('sound', SOUNDS.length, 1));
+stepRow('Volumen', () => S.vol + '%', () => { S.vol -= 10; refresh(); }, () => { S.vol += 10; refresh(); });
+stepRow('Sincronía visual', () => (S.sync > 0 ? '+' : '') + S.sync + ' ms', () => { S.sync -= 10; refresh(); }, () => { S.sync += 10; refresh(); });
+
+section('Pantalla');
+toggleRow('Ocultar controles', () => S.autoHide, () => { S.autoHide = !S.autoHide; refresh(); armHide(); });
+list.append(h('p', { class: 'note' }, 'Con el metrónomo andando, los botones se esconden a los 4 s. Cualquier gesto los vuelve a mostrar. “Atrás” cierra los ajustes.'));
+list.append(btn('Restablecer valores', () => { S = { ...DEF }; refresh(); }));
+
+/* --- Ajustes con historial: “Atrás” de las gafas cierra el panel --- */
+let settingsOpen = false;
+function showSettings() { settingsOpen = true; settings.hidden = false; clearTimeout(hideTimer); wake(); $('#doneBtn').focus(); settings.scrollTop = 0; }
+function hideSettings() { settingsOpen = false; settings.hidden = true; playBtn.focus(); armHide(); }
+function openSettings() {
+  try { history.pushState({ s: 'settings' }, ''); } catch (e) {}
+  showSettings();
+}
+function closeSettings() {
+  if (history.state && history.state.s === 'settings') history.back(); else hideSettings();
+}
+try { history.replaceState({ s: 'home' }, ''); } catch (e) {}
+window.addEventListener('popstate', (e) => { if (e.state && e.state.s === 'settings') showSettings(); else hideSettings(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && settingsOpen) closeSettings(); });
+
+/* --- Auto-ocultado de controles (despeja la visión) --- */
+let hideTimer = null, hidden = false;
+function armHide() {
+  clearTimeout(hideTimer);
+  if (playing && S.autoHide && !settingsOpen) hideTimer = setTimeout(() => { hidden = true; bar.classList.add('dim'); }, 4000);
+}
+function wake() { const was = hidden; hidden = false; bar.classList.remove('dim'); armHide(); return was; }
+// El primer gesto con los controles ocultos solo los muestra (no dispara una acción por accidente).
+document.addEventListener('keydown', (e) => { if (settingsOpen) return; if (wake()) { e.preventDefault(); e.stopPropagation(); } }, true);
+document.addEventListener('pointerdown', () => { if (!settingsOpen) wake(); }, true);
+
+/* --- Botones de la barra --- */
+$('#setBtn').addEventListener('click', openSettings);
+$('#doneBtn').addEventListener('click', closeSettings);
+playBtn.addEventListener('click', toggle);
+$('#minusBtn').addEventListener('click', () => setBpm(S.bpm - 5));
+$('#plusBtn').addEventListener('click', () => setBpm(S.bpm + 5));
+
+/* --- Arranque --- */
+refresh();
+resize();
+requestAnimationFrame(frame);
+playBtn.focus();
+})();
+</script>
+</body>
+</html>
