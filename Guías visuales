@@ -1,0 +1,29 @@
+// Cada tema empieza con #  y sigue: nombre | bpm | compás
+// Después, una línea por sección: nombre y cantidad de compases
+// "@140" cambia el tempo desde esa sección. Las líneas con // son comentarios.
+
+# Tema de ejemplo | 120 | 4/4
+Intro 4
+Verso 16
+Estribillo 8
+Verso 16
+Estribillo 8
+Puente 8
+Corte 2
+Estribillo 16
+Final 4
+
+# Balada lenta | 72 | 4/4
+Intro 2
+Verso 8
+Estribillo 8
+Solo 8
+Estribillo 8
+Final 2
+
+# Cambio de tempo | 100 | 4/4
+Intro 4
+Verso 8
+Puente 4 @140
+Estribillo 8 @100
+Final 4
